@@ -62,6 +62,32 @@ def point_set_to_sparse(p_full, p_part, n_full, n_part, resolution, filename, p_
 
     return [p_full, p_mean, p_std, p_part, filename]
 
+
+def point_preprocess(res_dict):
+
+    mask_0_3 = (~res_dict['p_0_3_gm_mask'] & res_dict['dist_0_3'])
+    mask_4 = (~res_dict['p_4_gm_mask'] & res_dict['dist_4'])
+
+    p_0_3 = res_dict['p_0_3'][mask_0_3]
+    p_4 = res_dict['p_4'][mask_4]
+    flow_0_3 = res_dict['flow_0_3'][mask_0_3]
+    valid_0_3 = res_dict['valid_0_3'][mask_0_3]
+    classes_0_3 = res_dict['classes_0_3'][mask_0_3]
+
+    max_points = 10000
+    if p_0_3.shape[0] > max_points:
+        num_points = p_0_3.shape[0]
+        indices = torch.randperm(num_points)[:max_points]  # 随机选 keep_num 个索引
+        p_0_3 = p_0_3[indices]
+        flow_0_3 = flow_0_3[indices]        
+        valid_0_3 = valid_0_3[indices]
+        classes_0_3 = classes_0_3[indices]
+
+    p_full = p_0_3 + flow_0_3
+    p_part = p_4
+    filename = res_dict['filename']
+    return [p_full, torch.ones(1), torch.ones(1), p_part, filename, flow_0_3, valid_0_3, classes_0_3]
+
 def numpy_to_sparse_tensor(p_coord, p_feats, p_label=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     p_coord = ME.utils.batched_coordinates(p_coord, dtype=torch.float32)
@@ -96,4 +122,35 @@ class SparseSegmentCollation:
             'std': torch.stack(batch[2]).float(),
             'pcd_part' if self.mode == 'diffusion' else 'pcd_noise': torch.stack(batch[3]).float(),
             'filename': batch[4],
+        }
+
+
+
+class SparseSegmentCollation_av2:
+    def __init__(self, mode='diffusion'):
+        self.mode = mode
+        return
+
+    def __call__(self, data):
+        # "transpose" the  batch(pt, ptn) to batch(pt), batch(ptn)
+        batch = list(zip(*data))
+        #填充，保证shape一致
+        # return {'pcd_full': torch.stack(batch[0]).float(),
+        #     'mean': torch.stack(batch[1]).float(),
+        #     'std': torch.stack(batch[2]).float(),
+        #     'pcd_part': torch.stack(batch[3]).float(),
+        #     'filename': batch[4],
+        #     'flow': torch.stack(batch[5]).float(),
+        #     'valid': torch.stack(batch[6]).float(),
+        #     'classes': torch.stack(batch[7]).float(),
+        # }
+
+        return {'pcd_full': torch.nn.utils.rnn.pad_sequence(batch[0], batch_first=True, padding_value=torch.nan),
+            'mean': torch.stack(batch[1]).float(),
+            'std': torch.stack(batch[2]).float(),
+            'pcd_part': torch.nn.utils.rnn.pad_sequence(batch[3], batch_first=True, padding_value=torch.nan),
+            'filename': batch[4],
+            'flow': torch.nn.utils.rnn.pad_sequence(batch[5], batch_first=True),
+            'valid': torch.nn.utils.rnn.pad_sequence(batch[6], batch_first=True),
+            'classes': torch.nn.utils.rnn.pad_sequence(batch[7], batch_first=True),
         }

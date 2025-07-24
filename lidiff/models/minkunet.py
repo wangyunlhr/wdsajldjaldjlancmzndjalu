@@ -6,6 +6,7 @@ import torch.nn as nn
 import MinkowskiEngine as ME
 import numpy as np
 from pykeops.torch import LazyTensor
+import open3d as o3d
 
 __all__ = ['MinkUNetDiff']
 
@@ -131,12 +132,30 @@ class MinkGlobalEnc(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
+    def forward(self, x): #将条件放进去编码
         x0 = self.stem(x.sparse())
         x1 = self.stage1(x0)
         x2 = self.stage2(x1)
         x3 = self.stage3(x2)
         x4 = self.stage4(x3)
+
+        # 可视化下采样之后的坐标
+            # pcd_refine = o3d.geometry.PointCloud()
+            # pcd_refine.points = o3d.utility.Vector3dVector((x1.C[:,1:]).cpu().detach().numpy())
+            # pcd_refine.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/pcd_x1_{x1.C.shape[0]}.ply', pcd_refine)
+            # pcd_diff = o3d.geometry.PointCloud()
+            # pcd_diff.points = o3d.utility.Vector3dVector((x2.C[:,1:]).cpu().detach().numpy())
+            # pcd_diff.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/pcd_x2_{x2.C.shape[0]}.ply', pcd_diff)
+            # pcd_part = o3d.geometry.PointCloud()
+            # pcd_part.points = o3d.utility.Vector3dVector((x3.C[:,1:]).cpu().detach().numpy())
+            # pcd_part.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/pcd_x3_{x3.C.shape[0]}.ply', pcd_part)
+            # pcd_part = o3d.geometry.PointCloud()
+            # pcd_part.points = o3d.utility.Vector3dVector((x4.C[:,1:]).cpu().detach().numpy())
+            # pcd_part.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/pcd_x4_{x4.C.shape[0]}.ply', pcd_part)
 
         return x4
 
@@ -418,17 +437,17 @@ class MinkUNetDiff(nn.Module):
         return x_part.F[match_feats]
 
     def forward(self, x, x_sparse, part_feats, t):
-        temp_emb = self.get_timestep_embedding(t)
+        temp_emb = self.get_timestep_embedding(t) #shape [1,96]
 
         x0 = self.stem(x_sparse)
-        match0 = self.match_part_to_full(x0, part_feats)
-        p0 = self.latent_stage1(match0) 
-        t0 = self.stage1_temp(temp_emb)
+        match0 = self.match_part_to_full(x0, part_feats) #找到加了噪声的稠密点fulldata对应的part特征
+        p0 = self.latent_stage1(match0) # 线性层
+        t0 = self.stage1_temp(temp_emb) # 线性层
         batch_temp = torch.unique(x0.C[:,0], return_counts=True)[1]
         t0 = torch.repeat_interleave(t0, batch_temp, dim=0) 
         w0 = self.latemp_stage1(torch.cat((p0,t0),-1))
 
-        x1 = self.stage1(x0*w0)
+        x1 = self.stage1(x0*w0) #1/2
         match1 = self.match_part_to_full(x1, part_feats)
         p1 = self.latent_stage2(match1) 
         t1 = self.stage2_temp(temp_emb)
@@ -436,7 +455,7 @@ class MinkUNetDiff(nn.Module):
         t1 = torch.repeat_interleave(t1, batch_temp, dim=0)
         w1 = self.latemp_stage2(torch.cat((p1,t1),-1))
 
-        x2 = self.stage2(x1*w1)
+        x2 = self.stage2(x1*w1) #1/4
         match2 = self.match_part_to_full(x2, part_feats)
         p2 = self.latent_stage3(match2) 
         t2 = self.stage3_temp(temp_emb)
@@ -444,7 +463,7 @@ class MinkUNetDiff(nn.Module):
         t2 = torch.repeat_interleave(t2, batch_temp, dim=0)
         w2 = self.latemp_stage3(torch.cat((p2,t2),-1))
 
-        x3 = self.stage3(x2*w2)
+        x3 = self.stage3(x2*w2) #1/8
         match3 = self.match_part_to_full(x3, part_feats)
         p3 = self.latent_stage4(match3) 
         t3 = self.stage4_temp(temp_emb)
@@ -452,7 +471,7 @@ class MinkUNetDiff(nn.Module):
         t3 = torch.repeat_interleave(t3, batch_temp, dim=0)
         w3 = self.latemp_stage4(torch.cat((p3,t3),-1))
 
-        x4 = self.stage4(x3*w3)
+        x4 = self.stage4(x3*w3) #1/16
         match4 = self.match_part_to_full(x4, part_feats)
         p4 = self.latent_up1(match4) 
         t4 = self.up1_temp(temp_emb)

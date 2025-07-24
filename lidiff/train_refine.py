@@ -1,3 +1,5 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import click
 from os.path import join, dirname, abspath
 from os import makedirs
@@ -8,7 +10,8 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 import MinkowskiEngine as ME
 import torch
 import yaml
-
+import sys
+sys.path.append('/data0/code/LiDiff-main')
 import lidiff.datasets.datasets_refine as datasets
 import lidiff.models.models_refine as models
 

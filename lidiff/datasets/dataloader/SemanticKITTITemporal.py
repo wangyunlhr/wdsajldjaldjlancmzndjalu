@@ -93,7 +93,7 @@ class TemporalKITTISet(Dataset):
         dist_part = np.sum(p_part**2, -1)**.5
         p_part = p_part[(dist_part < self.max_range) & (dist_part > 3.5)]
         p_part = p_part[p_part[:,2] > -4.]
-        pose = self.seq_poses[index]
+        pose = self.seq_poses[index] # 当前帧的lidar坐标系 to 世界坐标系
 
         p_map = self.cache_maps[seq_num]
 
@@ -122,7 +122,7 @@ class TemporalKITTISet(Dataset):
             p_part,
             self.num_points,
             n_part,
-            self.resolution,
+            self.resolution, # 0.05
             self.points_datapath[index],
             p_mean=self.data_stats['mean'],
             p_std=self.data_stats['std'],

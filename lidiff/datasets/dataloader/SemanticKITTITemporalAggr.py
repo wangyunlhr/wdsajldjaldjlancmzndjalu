@@ -72,8 +72,8 @@ class TemporalKITTISet(Dataset):
         fname = self.points_datapath[index][0].split('/')[-1].split('.')[0]
 
         #t_frame = np.random.randint(len(self.points_datapath[index]))
-        t_frame = int(len(self.points_datapath[index]) / 2)
-        p_full, p_part = aggregate_pcds(self.points_datapath[index], self.data_dir, t_frame)
+        t_frame = int(len(self.points_datapath[index]) / 2) #窗口中间帧
+        p_full, p_part = aggregate_pcds(self.points_datapath[index], self.data_dir, t_frame) #p_full是窗口累积帧, p_part是窗口中间帧
 
         p_concat = np.concatenate((p_full, p_part), axis=0)
         p_gt = p_concat.copy()
@@ -85,7 +85,7 @@ class TemporalKITTISet(Dataset):
         dist_noise = np.sqrt(dist_noise.sum(-1))
 
         _, mapping = ME.utils.sparse_quantize(coordinates=p_full / 0.1, return_index=True)
-        p_full = p_full[mapping]
+        p_full = p_full[mapping] # 0.1 voxel化，去重复
         dist_full = np.power(p_full, 2)
         dist_full = np.sqrt(dist_full.sum(-1))
 

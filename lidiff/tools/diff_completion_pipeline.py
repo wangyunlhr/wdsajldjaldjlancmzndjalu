@@ -1,3 +1,5 @@
+import sys
+sys.path.append('/data0/code/LiDiff-main/')
 import numpy as np
 import MinkowskiEngine as ME
 import torch
@@ -115,7 +117,7 @@ class DiffCompletion(LightningModule):
         return post_scan
 
     def complete_scan(self, scan):
-        scan = self.preprocess_scan(scan)
+        scan = self.preprocess_scan(scan) #最远点降采样到18000个点, 并重复10倍。
         x_feats = scan + torch.randn(scan.shape, device=self.device)
         x_full = self.points_to_tensor(x_feats)
         x_cond = self.points_to_tensor(scan)
@@ -155,8 +157,10 @@ class DiffCompletion(LightningModule):
     def completion_loop(self, x_init, x_t, x_cond, x_uncond):
         self.scheduler_to_cuda()
 
-        for t in tqdm.tqdm(range(len(self.dpm_scheduler.timesteps))):
-            t = self.dpm_scheduler.timesteps[t].cuda()[None]
+        for i in tqdm.tqdm(range(len(self.dpm_scheduler.timesteps))):
+            if i == (len(self.dpm_scheduler.timesteps) - 1):
+                print("final step")
+            t = self.dpm_scheduler.timesteps[i].cuda()[None]
 
             noise_t = self.classfree_forward(x_t, x_cond, x_uncond, t)
             input_noise = x_t.F.reshape(t.shape[0],-1,3) - x_init
@@ -177,8 +181,8 @@ def load_pcd(pcd_file):
         print(f"Point cloud format '.{pcd_file.split('.')[-1]}' not supported. (supported formats: .bin (kitti format), .ply)")
 
 @click.command()
-@click.option('--diff', '-d', type=str, default='checkpoints/diff_net.ckpt', help='path to the scan sequence')
-@click.option('--refine', '-r', type=str, default='checkpoints/refine_net.ckpt', help='path to the scan sequence')
+@click.option('--diff', '-d', type=str, default='/data0/code/LiDiff-main/lidiff/checkpoints/diff_net.ckpt', help='path to the scan sequence')
+@click.option('--refine', '-r', type=str, default='/data0/code/LiDiff-main/lidiff/checkpoints/refine_net.ckpt', help='path to the scan sequence')
 @click.option('--denoising_steps', '-T', type=int, default=50, help='number of denoising steps (default: 50)')
 @click.option('--cond_weight', '-s', type=float, default=6.0, help='conditioning weight (default: 6.0)')
 def main(diff, refine, denoising_steps, cond_weight):
@@ -188,10 +192,10 @@ def main(diff, refine, denoising_steps, cond_weight):
             diff, refine, denoising_steps, cond_weight
         )
 
-    path = './Datasets/test/'
+    path = '/data0/code/LiDiff-main/lidiff/Datasets/test'
 
-    os.makedirs(f'./results/{exp_dir}/refine', exist_ok=True)
-    os.makedirs(f'./results/{exp_dir}/diff', exist_ok=True)
+    os.makedirs(f'/data0/code/LiDiff-main/lidiff/results/{exp_dir}/refine', exist_ok=True)
+    os.makedirs(f'/data0/code/LiDiff-main/lidiff/results/{exp_dir}/diff', exist_ok=True)
 
     for pcd_path in tqdm.tqdm(natsorted(os.listdir(path))):
         pcd_file = os.path.join(path, pcd_path)

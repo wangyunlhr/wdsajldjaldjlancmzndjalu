@@ -14,6 +14,8 @@ from pytorch_lightning import LightningDataModule
 from lidiff.utils.collations import *
 from lidiff.utils.metrics import ChamferDistance, PrecisionRecall
 from diffusers import DPMSolverMultistepScheduler
+import open3d as o3d
+import os
 
 class DiffusionPoints(LightningModule):
     def __init__(self, hparams:dict, data_module: LightningDataModule = None):
@@ -100,7 +102,9 @@ class DiffusionPoints(LightningModule):
         x_cond = self.forward(x_t, x_t_sparse, x_cond, t)            
         x_uncond = self.forward(x_t, x_t_sparse, x_uncond, t)
 
-        return x_uncond + self.w_uncond * (x_cond - x_uncond)
+        # return x_uncond + self.w_uncond * (x_cond - x_uncond)
+        #! 改成完全依赖条件生成
+        return x_cond
 
     def visualize_step_t(self, x_t, gt_pts, pcd, pcd_mean, pcd_std, pidx=0):
         points = x_t.F.detach().cpu().numpy()
@@ -133,12 +137,14 @@ class DiffusionPoints(LightningModule):
         pcd = o3d.geometry.PointCloud()
         self.scheduler_to_cuda()
 
-        for t in tqdm(range(len(self.dpm_scheduler.timesteps))):
-            t = torch.ones(gt_pts.shape[0]).cuda().long() * self.dpm_scheduler.timesteps[t].cuda()
+        for i in tqdm(range(len(self.dpm_scheduler.timesteps))):
+            if i == len(self.dpm_scheduler.timesteps) - 1:
+                print('the last step')
+            t = torch.ones(gt_pts.shape[0]).cuda().long() * self.dpm_scheduler.timesteps[i].cuda()
             
             noise_t = self.classfree_forward(x_t, x_cond, x_uncond, t)
             input_noise = x_t.F.reshape(t.shape[0],-1,3) - x_init
-            x_t = x_init + self.dpm_scheduler.step(noise_t, t[0], input_noise)['prev_sample']
+            x_t = x_init + self.dpm_scheduler.step(noise_t, t[0], input_noise)['prev_sample'] #model_output t x_t(sample)
             x_t = self.points_to_tensor(x_t, x_mean, x_std)
 
             # this is needed otherwise minkEngine will keep "stacking" coords maps over the x_part and x_uncond
@@ -153,6 +159,17 @@ class DiffusionPoints(LightningModule):
     def p_losses(self, y, noise):
         return F.mse_loss(y, noise)
 
+    def p_losses_class(self, y, noise, classes):
+
+        class_unique = torch.unique(classes)
+        loss = 0.0
+        for c in class_unique:
+            idx = (classes == c)
+            loss += F.mse_loss(y[idx], noise[idx])
+        
+        loss /= class_unique.shape[0]
+        return loss
+
     def forward(self, x_full, x_full_sparse, x_part, t):
         part_feat = self.partial_enc(x_part)
         out = self.model(x_full, x_full_sparse, part_feat, t)
@@ -160,7 +177,7 @@ class DiffusionPoints(LightningModule):
         return out.reshape(t.shape[0],-1,3)
 
     def points_to_tensor(self, x_feats, mean, std):
-        x_feats = ME.utils.batched_coordinates(list(x_feats[:]), dtype=torch.float32, device=self.device)
+        x_feats = ME.utils.batched_coordinates(list(x_feats[:]), dtype=torch.float32, device=self.device) # B,X,Y,Z
 
         x_coord = x_feats.clone()
         x_coord[:,1:] = feats_to_coord(x_feats[:,1:], self.hparams['data']['resolution'], mean, std)
@@ -180,30 +197,69 @@ class DiffusionPoints(LightningModule):
     def training_step(self, batch:dict, batch_idx):
         # initial random noise
         torch.cuda.empty_cache()
-        noise = torch.randn(batch['pcd_full'].shape, device=self.device)
-        
-        # sample step t
-        t = torch.randint(0, self.t_steps, size=(batch['pcd_full'].shape[0],)).cuda()
-        # sample q at step t
-        # we sample noise towards zero to then add to each point the noise (without normalizing the pcd)
-        t_sample = batch['pcd_full'] + self.q_sample(torch.zeros_like(batch['pcd_full']), t, noise)
+        batch_size = batch['pcd_full'].shape[0]
+        loss_all = 0.0
+
+        for batch_id in range(batch_size):
+            full_not_nan_mask = ~torch.isnan(batch['pcd_full'][batch_id]).any(dim=1)
+            pcd_full = batch['pcd_full'][batch_id][full_not_nan_mask][None]
+            noise = torch.randn(pcd_full.shape, device=self.device)
+            # sample step t1
+            t = torch.randint(0, self.t_steps, size=(1,)).cuda()
+            # sample q at step t
+            # we sample noise towards zero to then add to each point the noise (without normalizing the pcd)
+            t_sample = pcd_full + self.q_sample(torch.zeros_like(pcd_full), t, noise)
+            # print('batch[pcd_full].shape', batch['pcd_full'].shape)
+            # print('batch[pcd_part].shape', batch['pcd_part'].shape)
+        # for visualization
+            # filename = batch['filename']
+            # os.makedirs(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}', exist_ok=True)
+            # pcd_refine = o3d.geometry.PointCloud()
+            # pcd_refine.points = o3d.utility.Vector3dVector(batch['pcd_full'].squeeze().cpu().detach().numpy())
+            # pcd_refine.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}/pcd_full_av2.ply', pcd_refine)
+            # pcd_diff = o3d.geometry.PointCloud()
+            # pcd_diff.points = o3d.utility.Vector3dVector((batch['pcd_full'] + noise).squeeze().cpu().detach().numpy())
+            # pcd_diff.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}/pcd_full_noise_av2.ply', pcd_diff)
+
+            # pcd_diff = o3d.geometry.PointCloud()
+            # pcd_diff.points = o3d.utility.Vector3dVector((batch['pcd_full'] - batch['flow']).squeeze().cpu().detach().numpy())
+            # pcd_diff.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}/pcd_full_overlap_av2.ply', pcd_diff)
+
+            # pcd_diff = o3d.geometry.PointCloud()
+            # pcd_diff.points = o3d.utility.Vector3dVector((batch['pcd_full'] - batch['flow'] + noise).squeeze().cpu().detach().numpy())
+            # pcd_diff.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}/pcd_full_overlap_noise_av2.ply', pcd_diff)
+
+            # pcd_part = o3d.geometry.PointCloud()
+            # pcd_part.points = o3d.utility.Vector3dVector(batch['pcd_part'].squeeze().cpu().detach().numpy())
+            # pcd_part.estimate_normals()
+            # o3d.io.write_point_cloud(f'/data0/code/LiDiff-main/lidiff/results/vis/{filename}/pcd_part_av2.ply', pcd_part)
 
         # replace the original points with the noise sampled
-        x_full = self.points_to_tensor(t_sample, batch['mean'], batch['std'])
+            x_full = self.points_to_tensor(t_sample, batch['mean'][batch_id][None], batch['std'][batch_id][None])
 
         # for classifier-free guidance switch between conditional and unconditional training
-        if torch.rand(1) > self.hparams['train']['uncond_prob'] or batch['pcd_full'].shape[0] == 1:
-            x_part = self.points_to_tensor(batch['pcd_part'], batch['mean'], batch['std'])
-        else:
-            x_part = self.points_to_tensor(
-                torch.zeros_like(batch['pcd_part']), torch.zeros_like(batch['mean']), torch.zeros_like(batch['std'])
-            )
 
-        denoise_t = self.forward(x_full, x_full.sparse(), x_part, t)
-        loss_mse = self.p_losses(denoise_t, noise)
-        loss_mean = (denoise_t.mean())**2
-        loss_std = (denoise_t.std() - 1.)**2
-        loss = loss_mse + self.hparams['diff']['reg_weight'] * (loss_mean + loss_std)
+        # if torch.rand(1) > self.hparams['train']['uncond_prob'] or batch['pcd_full'].shape[0] == 1:
+        #     x_part = self.points_to_tensor(batch['pcd_part'], batch['mean'], batch['std'])
+        # else:
+        #     x_part = self.points_to_tensor(
+        #         torch.zeros_like(batch['pcd_part']), torch.zeros_like(batch['mean']), torch.zeros_like(batch['std'])
+        #     )
+        #! 只进行有条件的生成
+            part_not_nan_mask = ~torch.isnan(batch['pcd_part'][batch_id]).any(dim=1)
+            pcd_part = batch['pcd_part'][batch_id][part_not_nan_mask][None]
+            x_part = self.points_to_tensor(pcd_part, batch['mean'][batch_id][None], batch['std'][batch_id][None])
+
+            denoise_t = self.forward(x_full, x_full.sparse(), x_part, t)
+            loss_mse = self.p_losses_class(denoise_t, noise, batch['classes'][batch_id][None])
+            loss_mean = (denoise_t.mean())**2
+            loss_std = (denoise_t.std() - 1.)**2
+            loss = loss_mse + self.hparams['diff']['reg_weight'] * (loss_mean + loss_std)
+            loss_all += loss
 
         std_noise = (denoise_t - noise)**2
         self.log('train/loss_mse', loss_mse)
@@ -214,7 +270,7 @@ class DiffusionPoints(LightningModule):
         self.log('train/std', std_noise.std())
         torch.cuda.empty_cache()
 
-        return loss
+        return loss_all
 
     def validation_step(self, batch:dict, batch_idx):
         if batch_idx != 0:
@@ -226,7 +282,7 @@ class DiffusionPoints(LightningModule):
             gt_pts = batch['pcd_full'].detach().cpu().numpy()
 
             # for inference we get the partial pcd and sample the noise around the partial
-            x_init = batch['pcd_part'].repeat(1,10,1)
+            x_init = batch['pcd_full'].clone() - batch['flow'].clone()# 
             x_feats = x_init + torch.randn(x_init.shape, device=self.device)
             x_full = self.points_to_tensor(x_feats, batch['mean'], batch['std'])
             x_part = self.points_to_tensor(batch['pcd_part'], batch['mean'], batch['std'])
