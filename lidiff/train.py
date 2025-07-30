@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import click
 from os.path import join, dirname, abspath
@@ -13,7 +13,7 @@ import torch
 import yaml
 import MinkowskiEngine as ME
 import sys
-sys.path.append('/data0/code/LiDiff-main')
+sys.path.append('/data0/code/LiDiff-main_change')
 import lidiff.datasets.datasets as datasets
 import lidiff.models.models as models
 
@@ -100,8 +100,8 @@ def main(config, weights, checkpoint, test):
                           max_epochs= cfg['train']['max_epoch'],
                           callbacks=[lr_monitor, checkpoint_saver],
                           check_val_every_n_epoch=1,
-                          num_sanity_val_steps=0,
-                          limit_val_batches=1,
+                          num_sanity_val_steps= 5,
+                          limit_val_batches=1.0,
                         #   accelerator='ddp',
                           strategy="ddp_find_unused_parameters_false" if cfg['train']['n_gpus'] else "auto",
                           )

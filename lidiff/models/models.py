@@ -16,6 +16,7 @@ from lidiff.utils.metrics import ChamferDistance, PrecisionRecall
 from diffusers import DPMSolverMultistepScheduler
 import open3d as o3d
 import os
+from scripts.network.official_metric import OfficialMetrics, evaluate_leaderboard, evaluate_leaderboard_v2
 
 class DiffusionPoints(LightningModule):
     def __init__(self, hparams:dict, data_module: LightningDataModule = None):
@@ -82,6 +83,8 @@ class DiffusionPoints(LightningModule):
         self.precision_recall = PrecisionRecall(self.hparams['data']['resolution'],2*self.hparams['data']['resolution'],100)
 
         self.w_uncond = self.hparams['train']['uncond_w']
+        #! 添加指标监督
+        self.metrics = OfficialMetrics()
 
     def scheduler_to_cuda(self):
         self.dpm_scheduler.timesteps = self.dpm_scheduler.timesteps.cuda()
@@ -94,6 +97,8 @@ class DiffusionPoints(LightningModule):
         self.dpm_scheduler.sigmas = self.dpm_scheduler.sigmas.cuda()
 
     def q_sample(self, x, t, noise):
+        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(t.device)
+        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(t.device)
         return self.sqrt_alphas_cumprod[t][:,None,None].cuda() * x + \
                 self.sqrt_one_minus_alphas_cumprod[t][:,None,None].cuda() * noise
 
@@ -136,7 +141,7 @@ class DiffusionPoints(LightningModule):
     def p_sample_loop(self, x_init, x_t, x_cond, x_uncond, gt_pts, x_mean, x_std):
         pcd = o3d.geometry.PointCloud()
         self.scheduler_to_cuda()
-
+        # x_init是多个源帧的叠加，x_t是x_init添加噪声之后，x_cond是目标帧
         for i in tqdm(range(len(self.dpm_scheduler.timesteps))):
             if i == len(self.dpm_scheduler.timesteps) - 1:
                 print('the last step')
@@ -152,7 +157,6 @@ class DiffusionPoints(LightningModule):
             x_cond, x_uncond = self.reset_partial_pcd(x_cond, x_uncond, x_mean, x_std)
             torch.cuda.empty_cache()
 
-        makedirs(f'{self.logger.log_dir}/generated_pcd/', exist_ok=True)
 
         return x_t
 
@@ -273,8 +277,7 @@ class DiffusionPoints(LightningModule):
         return loss_all
 
     def validation_step(self, batch:dict, batch_idx):
-        if batch_idx != 0:
-            return
+
 
         self.model.eval()
         self.partial_enc.eval()
@@ -282,7 +285,8 @@ class DiffusionPoints(LightningModule):
             gt_pts = batch['pcd_full'].detach().cpu().numpy()
 
             # for inference we get the partial pcd and sample the noise around the partial
-            x_init = batch['pcd_full'].clone() - batch['flow'].clone()# 
+            x_init = batch['pcd_full'].clone() - batch['flow'].clone()#! 多源帧叠加的数据
+            pc0 = batch['pcd_full'].clone() - batch['flow'].clone()
             x_feats = x_init + torch.randn(x_init.shape, device=self.device)
             x_full = self.points_to_tensor(x_feats, batch['mean'], batch['std'])
             x_part = self.points_to_tensor(batch['pcd_part'], batch['mean'], batch['std'])
@@ -291,32 +295,68 @@ class DiffusionPoints(LightningModule):
             )
 
             x_gen_eval = self.p_sample_loop(x_init, x_full, x_part, x_uncond, gt_pts, batch['mean'], batch['std'])
-            x_gen_eval = x_gen_eval.F.reshape((gt_pts.shape[0],-1,3))
-
+            x_gen_eval = x_gen_eval.F.reshape((gt_pts.shape[0],-1,3))  #预测的补全点云，真值是gt_pts
+            ground_truth = batch['pcd_full'].clone()
             for i in range(len(batch['pcd_full'])):
-                pcd_pred = o3d.geometry.PointCloud()
-                c_pred = x_gen_eval[i].cpu().detach().numpy()
-                pcd_pred.points = o3d.utility.Vector3dVector(c_pred)
 
-                pcd_gt = o3d.geometry.PointCloud()
-                g_pred = batch['pcd_full'][i].cpu().detach().numpy()
-                pcd_gt.points = o3d.utility.Vector3dVector(g_pred)
+                v1_dict= evaluate_leaderboard(x_gen_eval[i], torch.zeros_like(x_gen_eval[i]), pc0[i], ground_truth[i], \
+                                           batch['valid'][i], batch['classes'][i])
+                v2_dict = evaluate_leaderboard_v2(x_gen_eval[i], torch.zeros_like(x_gen_eval[i]), pc0[i], ground_truth[i], \
+                                           batch['valid'][i], batch['classes'][i])
+                
+                self.metrics.step(v1_dict, v2_dict)
+                # pcd_pred = o3d.geometry.PointCloud()
+                # c_pred = x_gen_eval[i].cpu().detach().numpy()
+                # pcd_pred.points = o3d.utility.Vector3dVector(c_pred)
 
-                self.chamfer_distance.update(pcd_gt, pcd_pred)
-                self.precision_recall.update(pcd_gt, pcd_pred)
+                # pcd_gt = o3d.geometry.PointCloud()
+                # g_pred = batch['pcd_full'][i].cpu().detach().numpy()
+                # pcd_gt.points = o3d.utility.Vector3dVector(g_pred)
 
-        cd_mean, cd_std = self.chamfer_distance.compute()
-        pr, re, f1 = self.precision_recall.compute_auc()
+                # self.chamfer_distance.update(pcd_gt, pcd_pred)
+                # self.precision_recall.update(pcd_gt, pcd_pred)
 
-        self.log('val/cd_mean', cd_mean, on_step=True)
-        self.log('val/cd_std', cd_std, on_step=True)
-        self.log('val/precision', pr, on_step=True)
-        self.log('val/recall', re, on_step=True)
-        self.log('val/fscore', f1, on_step=True)
+        # cd_mean, cd_std = self.chamfer_distance.compute()
+        # pr, re, f1 = self.precision_recall.compute_auc()
+
+        # self.log('val/cd_mean', cd_mean, on_step=True)
+        # self.log('val/cd_std', cd_std, on_step=True)
+        # self.log('val/precision', pr, on_step=True)
+        # self.log('val/recall', re, on_step=True)
+        # self.log('val/fscore', f1, on_step=True)
         torch.cuda.empty_cache()
-
-        return {'val/cd_mean': cd_mean, 'val/cd_std': cd_std, 'val/precision': pr, 'val/recall': re, 'val/fscore': f1}
+        # return {'val/cd_mean': cd_mean, 'val/cd_std': cd_std, 'val/precision': pr, 'val/recall': re, 'val/fscore': f1}
     
+
+    def on_validation_epoch_end(self):
+
+
+        # if self.av2_mode == 'test':
+        #     print(f"\nModel: {self.model.__class__.__name__}, Checkpoint from: {self.load_checkpoint_path}")
+        #     print(f"Test results saved in: {self.save_res_path}, Please run submit to zip the results and upload to online leaderboard.")
+        #     return
+        
+        # if self.av2_mode == 'val':
+        #     print(f"\nModel: {self.model.__class__.__name__}, Checkpoint from: {self.load_checkpoint_path}")
+        #     print(f"More details parameters and training status are in checkpoints")        
+
+        self.metrics.normalize()
+
+        # wandb log things:
+        for key in self.metrics.bucketed:
+            for type_ in 'Static', 'Dynamic':
+                self.log(f"val/{type_}/{key}", self.metrics.bucketed[key][type_])
+        for key in self.metrics.epe_3way:
+            self.log(f"val/{key}", self.metrics.epe_3way[key])
+        
+        self.metrics.print()
+        self.metrics = OfficialMetrics()
+
+
+
+
+
+
     def valid_paths(self, filenames):
         output_paths = []
         skip = []
